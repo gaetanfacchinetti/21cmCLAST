@@ -327,7 +327,7 @@ def _setup_inputs(
     # Similarly, OMr is not impacted by the neutrino mass in this implementation
     if params["user_params"].USE_OMEGA_H2 : 
         
-        OMm = (_cosmo_params.Omdmh2 + _cosmo_params.Ombh2) / (_cosmo_params.hlittle**2)
+        OMm = (_cosmo_params.Omch2 + _cosmo_params.Ombh2) / (_cosmo_params.hlittle**2)
         OMb = _cosmo_params.Ombh2 / (_cosmo_params.hlittle**2)
 
         params["cosmo_params"] = CosmoParams(params["cosmo_params"], OMm = OMm, OMb = OMb)
@@ -616,15 +616,33 @@ def pmf_induced_matter_power_spectrum(k, *, user_params=None, cosmo_params=None,
     params = init_TF_and_IGM_tables(user_params = user_params, cosmo_params = cosmo_params, astro_params = astro_params, flag_options = flag_options)
     return  _generic_c_call(k, lib.ComputePMFInducedMatterPowerSpectrum, *params)
 
-
+# Intergalactic medium termperature (in K) from the averaged homogeneous evolution equations
 def igm_temp_from_table(z, *, user_params=None, cosmo_params=None, astro_params=None, flag_options=None) : 
     params = init_TF_and_IGM_tables(user_params = user_params, cosmo_params = cosmo_params, astro_params = astro_params, flag_options = flag_options)
     return  _generic_c_call(z, lib.ComputeTKFromTable, *params)
-    
+
+# Intergalactic medium free electron fraction from the averaged homogeneous evolution equations
 def igm_xe_from_table(z, *, user_params=None, cosmo_params=None, astro_params=None, flag_options=None) : 
     params = init_TF_and_IGM_tables(user_params = user_params, cosmo_params = cosmo_params, astro_params = astro_params, flag_options = flag_options)
     return  _generic_c_call(z, lib.ComputeXionFromTable, *params)
     
+# Hubble rate in (s^{-1})
+def hubble_rate(z, *, user_params=None, cosmo_params=None, astro_params=None, flag_options=None):
+    params = _setup_inputs({ "user_params": user_params, "cosmo_params": cosmo_params, "astro_params" : astro_params, "flag_options" : flag_options})
+    return _generic_c_call(z, lib.ComputeHubbleRate, *params)
+
+# Heating rate from PMF turbulences (in 1/s)
+def decay_rate_heat_turbulences_pmf(z, chiB, *, user_params=None, cosmo_params=None, astro_params=None, flag_options=None) : 
+    params = _setup_inputs({ "user_params": user_params, "cosmo_params": cosmo_params, "astro_params" : astro_params, "flag_options" : flag_options}) 
+    c_params = [chiB]
+    return _generic_c_call_params(z, c_params, lib.ComputeDecayRateHeatTurbulencesPMF, *params)
+
+# Heating rate from PMF ambipolar diffusion (in 1/s)
+def decay_rate_heat_ambipolar_pmf(z, xe, Tk, chiB, *, user_params=None, cosmo_params=None, astro_params=None, flag_options=None) : 
+    params = _setup_inputs({ "user_params": user_params, "cosmo_params": cosmo_params, "astro_params" : astro_params, "flag_options" : flag_options}) 
+    c_params = [xe, Tk, chiB]
+    return _generic_c_call_params(z, c_params, lib.ComputeDecayRateHeatAmbipolarPMF, *params)
+
 
 def _generic_c_call(var, c_func, user_params, cosmo_params, astro_params, flag_options):
 
@@ -2762,6 +2780,8 @@ def run_coeval(
 
         lib.free_TF_CLASS() # Gaétan added that here at the end of the code
         lib.destruct_heat()
+        lib.destruct_pmf()
+        lib.destruct_pmf_growth()
     
         return coevals
 
@@ -2839,6 +2859,35 @@ def _c_call_init_IGM_from_input(z, TK, xe):
     assert status == 1, "FATAL ERROR: error in calling InitIGMEvolutionTablesFromInput from heating_helper_prog.c"
 
 
+def _c_call_init_PMF_from_input(z, chiB):
+
+    # Convert the data to the right type
+    z = np.array(z, dtype="float32")
+    _z = ffi.cast("float *", ffi.from_buffer(z))
+
+    chiB = np.array(chiB, dtype="float32")
+    _chiB = ffi.cast("float *", ffi.from_buffer(chiB))
+
+
+    status = lib.InitPMFEvolutionTablesFromInput(_z, _chiB, len(z))
+    assert status == 1, "FATAL ERROR: error in calling InitPMFEvolutionTablesFromInput from heating_helper_prog.c"
+
+
+
+def _c_call_init_PMF_growth_from_input(z, MB):
+
+    # Convert the data to the right type
+    z = np.array(z, dtype="float32")
+    _z = ffi.cast("float *", ffi.from_buffer(z))
+
+    MB = np.array(MB, dtype="float32")
+    _MB = ffi.cast("float *", ffi.from_buffer(MB))
+
+
+    status = lib.InitPMFGrowthEvolutionTablesFromInput(_z, _MB, len(z))
+    assert status == 1, "FATAL ERROR: error in calling InitPMFEvolutionTablesFromInput from heating_helper_prog.c"
+
+
 
 def _compute_sigma_A_PMF(cosmo_hyrec):
     
@@ -2855,8 +2904,8 @@ def _compute_sigma_A_PMF(cosmo_hyrec):
 
     # compute the typical Alfven magnetic scale sigma_A
     vA_sigmaB0 = 1./np.sqrt(pyhy.rho_gamma(cosmo_hyrec) * _MU_0_ * _C_LIGHT_**2 * 4/3) # in nG^{-1}
-    kA = pyhy.compute_acoustic_damping_scale(cosmo_hyrec) # in Mpc^{-1}, this makes a first call to HYREC C-code without exotic energy injection
-    sigma_A = kA/vA_sigmaB0/(2*np.pi) # in nG
+    k_gamma = pyhy.compute_acoustic_damping_scale(cosmo_hyrec) # in Mpc^{-1}, this makes a first call to HYREC C-code without exotic energy injection
+    sigma_A = k_gamma/vA_sigmaB0/(2.0*np.pi) # in nG
     
     return sigma_A
 
@@ -2902,7 +2951,7 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
     if user_params.power_spectrum_model.upper() != "CLASS" or _CLASS_IMPORTED is False or user_params.USE_CLASS_TABLES is True:
         
         if _CLASS_IMPORTED is False:
-            if user_params.power_spectrum_model.upper == "CLASS" and user_params.USE_CLASS_TABLES is False :
+            if user_params.power_spectrum_model.upper() == "CLASS" and user_params.USE_CLASS_TABLES is False :
                 logger.warning("Classy module not found, use precomputed table for the computation!") 
                 user_params.update(USE_CLASS_TABLES = True)
 
@@ -2926,13 +2975,16 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
                                                     'mnu1' : m_neutrinos[0], 'mnu2' : m_neutrinos[1], 'mnu3' : m_neutrinos[2], 
                                                     'YHe' : global_params.Y_He, 'Omega_k' : global_params.OMk, 'w0' : global_params.wl})
             
+            # update the zrec attribute self consistently
+            cosmo_hyrec.update(zrec=pyhy.compute_z_rec(cosmo_hyrec))
+            
             # initialise the injection params for HYREC if necessary
             injec_hyrec_params = {}
             
             ###########
             ## Effect of primordial magnetic fiels
 
-            sigma_A = cosmo_params.PMF_SIGMA_A_0
+            sigma_A = cosmo_params.PMF_SIGMA_A
             
             # Alfven magnetic scale in case of PMF effect
             if user_params.PMF_HEATING_TURB or user_params.PMF_HEATING_AD or user_params.PMF_POWER_SPECTRUM:
@@ -2949,7 +3001,7 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
                 if user_params.PMF_HEATING_AD and not user_params.PMF_HEATING_TURB:
                     heating_channel = 2
                 
-                injec_hyrec_params = {'sigmaB_PMF' : cosmo_params.PMF_SIGMA_B_0, 'nB_PMF' : cosmo_params.PMF_B_INDEX, 'sigmaA_PMF' : sigma_A, 'heat_channel_PMF' : heating_channel}
+                injec_hyrec_params = {'sB_PMF' : 10**cosmo_params.LOG10_PMF_SB, 'nB_PMF' : cosmo_params.PMF_NB, 'sigmaA_PMF' : sigma_A, 'heat_channel_PMF' : heating_channel}
             
             # define the exotic energy injection object for HYREC
             # so far, only exotic injection from primordial magnetic fields included
@@ -2957,11 +3009,15 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
             ###########
 
             # run HYREC and pass the result to 21cmFAST C-code
-            z_hyrec, xe_hyrec, Tm_hyrec = pyhy.call_run_hyrec(cosmo_hyrec(), injec_hyrec())
-            _c_call_init_IGM_from_input(z_hyrec, Tm_hyrec, xe_hyrec)  
+            res_hyrec = pyhy.call_run_hyrec(cosmo_hyrec(), injec_hyrec())
+            _c_call_init_IGM_from_input(res_hyrec['z'], res_hyrec['Tm'], res_hyrec['xe'])  
+            _c_call_init_PMF_from_input(res_hyrec['z'], res_hyrec['chiB'])
+            _c_call_init_PMF_growth_from_input(res_hyrec['z'], res_hyrec['MB'])
 
             if user_params.PMF_HEATING_TURB or user_params.PMF_HEATING_AD or user_params.PMF_POWER_SPECTRUM:
-                cosmo_params.update(PMF_SIGMA_A_0 = sigma_A)
+                cosmo_params.update(PMF_SIGMA_A = sigma_A)
+
+            # print("sigma_A =", sigma_A, "| zrec = ", cosmo_hyrec.zrec, flush=True)
             
         return (user_params, cosmo_params, astro_params, flag_options)
     
@@ -2969,22 +3025,22 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
 
     # define general parameters for CLASS
     
-    _h             = cosmo_params.hlittle
+    _h = cosmo_params.hlittle
     omega_cdm_LCDM = (cosmo_params.OMm - cosmo_params.OMb) * _h**2
-    m_min          = ((10**astro_params.M_TURN)/50.0) if (not flag_options.USE_MINI_HALOS) else 1e+3
-    k_max_21cm     = 20*(2.78e+11 * (_h**2) * cosmo_params.OMm / m_min)**(1./3.) # rough approximation of the maximal value of k we need
+    m_min = ((10**astro_params.M_TURN)/50.0) if (not flag_options.USE_MINI_HALOS) else 1e+3
+    k_max = 20*(2.78e+11 * (_h**2) * cosmo_params.OMm / m_min)**(1./3.) # rough approximation of the maximal value of k we need
     #k_max = 10.0/mass_to_radius((10**astro_params.M_TURN)/50.0) if (not flag_options.USE_MINI_HALOS) else 1e+3
     neff_array = [3.044, 2.0308, 1.0176, 0.00441]
     
 
-    params_class_init = {'output' : 'mPk, mTk',
+    params_class_init = {'output' : 'mPk',
         'h': _h,
         'YHe' : global_params.Y_He,
         'omega_b': cosmo_params.OMb * _h**2,
         'A_s': 1e-10 * np.exp(cosmo_params.Ln_1010_As),
         'n_s': cosmo_params.POWER_INDEX,
         'alpha_s' : cosmo_params.ALPHA_S_PS,
-        'P_k_max_h/Mpc': k_max_21cm / _h,
+        'P_k_max_h/Mpc': k_max / _h,
         'reio_parametrization': 'reio_none', 
         # 21cmFAST will take care of the reionization
         }
@@ -2993,7 +3049,7 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
     # function at redshift z=1010 (slows down the computation)
     if user_params.USE_RELATIVE_VELOCITIES is True:
         params_class_init = params_class_init | {'z_pk' : 1010}
-        params_class_init['output'] = 'mPk, vTk, mTk'
+        params_class_init['output'] = 'mPk, vTk'
     
     #################################################
     #################################################
@@ -3048,7 +3104,6 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
     f_wdm = cosmo_params.FRAC_WDM
 
     # define warm dark matter properties here if fraction above 0
-    n_wdm = 0
     if f_wdm > 0:
         
         # remove warm dark matter mass the cdm component
@@ -3083,11 +3138,10 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
             T_ncdm   = np.append(T_ncdm,  0.71611 * (omega_wdm * 93.14 / m_wdm)**(1./3.))
             fluid_approx = np.append(fluid_approx, user_params.CLASS_FLUID_APPROX_WDM)
 
-
-            # moved below
             # if all DM in WDM, we don't need to evaluate the power spectrum at extremely large modes
             # we cut at 10 times the WDM cutoff
-            #if f_wdm == 1: 
+            if f_wdm == 1:
+                k_max = np.min([k_max, 10./(0.049 * pow(cosmo_params.OMm * _h * _h /0.25/m_wdm, 0.11) / m_wdm * 1.54518467138)])
 
 
     #############################################
@@ -3129,12 +3183,15 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
                                         'deg_ncdm' : deg_ncdm_str,
                                         'N_ncdm' : n_ncdm,
                                         'T_ncdm' : T_ncdm_str,
-                                        'ncdm_fluid_approximation' : fluid_approx_str,}#} 
-                                        #'k_per_decade_for_pk' : 70,}
+                                        'ncdm_fluid_approximation' : fluid_approx_str,} 
+                                        #'k_per_decade_for_pk' : 40,}
     
     
     # adding the properties of DM-neutrinos interactions
     params_class = params_class | nu_dm_params
+
+    # update the value of P_k_max 
+    params_class['P_k_max_h/Mpc'] = k_max / _h
 
     # assert that we do not have a negative amount of dark matter
     assert omega_cdm >= 0, ValueError("The abundance of cold dark matter cannot go below 0")
@@ -3151,9 +3208,7 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
 
     # to normalise to sigma_8 the LCDM power spectrum is needed
     # if the model is simply LCDM then we only run this part
-    # if n_wdm > 0 then we need the LCDM value to compare
-    # the transfer function to and check we have taken a value of k_max large enough
-    if (user_params.USE_SIGMA_8_NORM is True or n_ncdm == 0) or (n_wdm > 0):
+    if user_params.USE_SIGMA_8_NORM is True or n_ncdm == 0:
 
         # Put the correct values for the parameters missing in the init params dict
         params_class_LCDM = params_class_init | {'omega_cdm' : omega_cdm_LCDM}
@@ -3168,23 +3223,24 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
         # Get the transfer functions            
         # the matter transfer function is defined w.r.t. the primordial power spectrum
         # T_m^2(k) =  (k^3 / (2 \pi^2)) Pm(k) / P_R(k)
-        _k_array_LCDM   = np.logspace(np.log10(1e-4), np.log10(params_class_LCDM['P_k_max_h/Mpc'] * _h), 500)
+        
+        #_transfer_LCDM = cosmo_CLASS_LCDM.get_transfer()
+        #_k_array_LCDM = _transfer_LCDM['k (h/Mpc)'][:-1] * _h
+        _k_array = np.logspace(np.log10(1e-4), np.log10(params_class_LCDM['P_k_max_h/Mpc'] * _h), 500)
         _mps_array_LCDM = np.array([cosmo_CLASS_LCDM.pk_lin(k, 0) for k in _k_array_LCDM])
         _Tm_array_LCDM  = np.sqrt(_k_array_LCDM**3 * _mps_array_LCDM / primordial_power_spectrum(_k_array_LCDM) / (2*np.pi**2) )
         
         # relative velocities transfer function only computed if necessary
-        _Tvcb_array_LCDM = np.zeros(len(_k_array_LCDM))
-        if user_params.USE_RELATIVE_VELOCITIES:
-            _transfer_1010_LCDM = cosmo_CLASS_LCDM.get_transfer(z = 1010)
-            _k_CLASS_LCDM       = _transfer_1010_LCDM['k (h/Mpc)'][:-1] * _h # we don't take the last point for numerical issues and instead use the value of the second to last (in the interpolation below)
-            _Tvcb_array_LCDM    = interp1d(_k_CLASS_LCDM, _transfer_1010_LCDM['t_b'][:-1], bounds_error = False, fill_value = (0.0, _transfer_1010_LCDM['t_b'][-2]))(_k_array_LCDM)/_k_array_LCDM
+        _Tvcb_array_LCDM = cosmo_CLASS_LCDM.get_transfer(z = 1010)['t_b'][:-1]/_k_array_LCDM if user_params.USE_RELATIVE_VELOCITIES else np.zeros(len(_k_array_LCDM))
         
+        #_Tvcb_array_LCDM = _transfer_LCDM['t_b'][:-1]
+
 
     # with ncdm components and normalisation with As (not sigma_8)
     # no need to define a LCDM transfer function
     # however necessary to initialise this part to fill the C arrays
     # and avoid a segmentation fault
-    if (user_params.USE_SIGMA_8_NORM is False and n_ncdm > 0) and (n_wdm == 0):
+    if user_params.USE_SIGMA_8_NORM is False and n_ncdm > 0:
         
         # define dummy default arrays
         _k_array_LCDM    = np.array([1, 2, 3, 4, 5])
@@ -3192,97 +3248,8 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
         _Tvcb_array_LCDM = np.zeros(5)
     
 
-    # if warm dark matter then makes enter this complicated loop
-    if n_wdm > 0:
-
-        # creating a Class object
-        cosmo_CLASS = Class()
-
-        k_max = np.array([k_max_21cm])
-
-        if n_wdm > 0:
-            # rough approximation of the maximum k we need for warm dark matter
-            # be careful that m_wdm is in eV for CLASS
-            k_max_wdm = 3.0/(0.049 * pow(cosmo_params.OMm * _h * _h /0.25/(1e-3 * m_wdm), 0.11) / (1e-3 * m_wdm) * 1.54518467138)
-            
-            print("k_max_wdm (init) =", k_max_wdm, "Mpc^{-1}", flush = True)
-
-            if k_max_wdm < k_max_21cm:
-                n = int(np.floor(np.min([50, (np.log10(k_max_21cm) - np.log10(k_max_wdm))/0.04]))) # np.log10(1.2) ~ 0.04
-                k_max = np.logspace(np.log10(k_max_wdm), np.log10(k_max_21cm), n)
-                
-
-        ncdm_precision: bool = False      
-        n_call_class: int    = 0
-
-        # for pure wdm scenarios or scenarios where computing the matter power spectrum
-        # at large modes can be sources of issues we go through trial and errors to find
-        # a good value of k_max that would be interesting
-        while ncdm_precision is False and n_call_class < len(k_max) :
-
-            # update the value of P_k_max 
-            params_class['P_k_max_h/Mpc'] = k_max[n_call_class] / _h
-            cosmo_CLASS.set(params_class)
-            
-            # try to run CLASS
-            try:
-                print(str(n_call_class) + ": CLASS parameters are :\n", params_class, flush=True)
-                cosmo_CLASS.compute()
-            except Exception as e:
-                print(str(n_call_class) + ": Problem with the class solver with NCDM components:", flush = True)
-                raise e
-            
-            # we increase the number of class calls in the loop by one
-            n_call_class = n_call_class + 1
-
-            # Get the transfer functions
-            _k0_CLASS = cosmo_CLASS.get_transfer(z = 0)['k (h/Mpc)'][0] * _h # get the range of k CLASS has made the computation on
-            _k_array_temp   = np.logspace(np.log10(_k0_CLASS), np.log10(params_class['P_k_max_h/Mpc'] * _h), 500)
-            _mps_array_temp = np.array([cosmo_CLASS.pk_lin(k, 0) for k in _k_array_temp])
-            _Tm_array_temp  = np.sqrt(_k_array_temp**3 * _mps_array_temp / primordial_power_spectrum(_k_array_temp) / (2*np.pi**2) )
-
-            # Let us say we do not need to go further if we find a decrease of the power of the order 1e-2
-            # first get the value of the LCDM transfer function at the k_max considered here
-            _Tm_LCDM = interp1d(_k_array_LCDM, _Tm_array_LCDM)(_k_array_temp[-1])
-            if (_Tm_array_temp[-1] / _Tm_LCDM) < 1e-2:
-                ncdm_precision = True
-                
-        if (ncdm_precision is False) and (n_wdm > 0) and len(k_max) > 1:
-            # if len(k_max) == 1 it must mean that k_max = k_max_21cm 
-            # then we do not need to reach the precision, as long as we
-            # compute everything up to k_max_21cm
-            print("Precision could not be achieved T_NCDM/T_LCDM(k_max) =", _Tm_array_temp[-1] / _Tm_LCDM, flush=True)
-        
-        if n_wdm > 0:
-            # in the wdm case, we may have computed the power spectrum up to a given k
-            # because 21cm will extrapolate from the last value it is safer to set it to
-            # a very small value after the maximum value of k we computed
-            # (note that we cannot set it to zero exaclty as the C code interpolates log quantities)
-            npts: int = 500 * int(np.log10(k_max_21cm) + 4) # putting 500 points per decade
-            _k_array  =  np.logspace(np.log10(_k_array_temp[0]), np.log10(k_max_21cm), npts)
-            _Tm_array = interp1d(_k_array_temp, _Tm_array_temp, bounds_error = False, fill_value = 1e-10 * _Tm_array_temp[-1])(_k_array)
-            print("The value of k_max set is =", k_max[n_call_class-1], "Mpc^{-1} | T_NCDM/T_LCDM(k_max) =", _Tm_array_temp[-1] / _Tm_LCDM, flush=True)
-        else:
-            # if not wdm then we just take the array of k and transfer function as it has been computed
-            _k_array   = _k_array_temp
-            _Tm_array  = _Tm_array_temp
-
-
-
-        # relative velocities transfer function only computed if necessary
-        _Tvcb_array = np.zeros(len(_k_array))
-        if user_params.USE_RELATIVE_VELOCITIES:
-            _transfer_1010 = cosmo_CLASS.get_transfer(z = 1010)
-            _k_CLASS       = _transfer_1010['k (h/Mpc)'][:-1] * _h # we don't take the last point for numerical issues and instead use the value of the second to last (in the interpolation below)
-            _Tvcb_array    = interp1d(_k_CLASS, _transfer_1010['t_b'][:-1], bounds_error = False, fill_value = (0.0, _transfer_1010['t_b'][-2]))(_k_array)/_k_array
-
-        # get the thermodynamics
-        _thermo  = cosmo_CLASS.get_thermodynamics()
-    
-
-    # if we have non cold dark matter but its not warm dark matter
-    # here we make things simpler by just computing the trye power spectrum
-    if n_ncdm > 0 and n_wdm == 0:
+    # if ncdm component
+    if n_ncdm > 0:
 
         print("CLASS parameters are :\n", params_class, flush=True)
 
@@ -3290,31 +3257,28 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
         cosmo_CLASS = Class()
         cosmo_CLASS.set(params_class)
         cosmo_CLASS.compute()
-        
-        # Get the transfer functions            
-        # the matter transfer function is defined w.r.t. the primordial power spectrum
-        # T_m^2(k) =  (k^3 / (2 \pi^2)) Pm(k) / P_R(k)
-        _k_array   = np.logspace(np.log10(1e-4), np.log10(params_class['P_k_max_h/Mpc'] * _h), 500)
-        _mps_array = np.array([cosmo_CLASS.pk_lin(k, 0) for k in _k_array])
-        _Tm_array  = np.sqrt(_k_array**3 * _mps_array / primordial_power_spectrum(_k_array) / (2*np.pi**2) )
-        
+
+        # Get the transfer functions
+
+        _k_array = np.logspace(np.log10(1e-4), np.log10(params_class['P_k_max_h/Mpc'] * _h), 500)
+        #_transfer = cosmo_CLASS.get_transfer()
+        #_k_array  = _transfer['k (h/Mpc)'][:-1] * _h
+        _mps_array =  np.array([cosmo_CLASS.pk_lin(k, 0) for k in _k_array])
+        _Tm_array  =  np.sqrt(_k_array**3 * _mps_array / primordial_power_spectrum(_k_array) / (2*np.pi**2) )
+        #_Tvcb_array = _transfer['t_b'][:-1]
+
         # relative velocities transfer function only computed if necessary
-        _Tvcb_array = np.zeros(len(_k_array))
-        if user_params.USE_RELATIVE_VELOCITIES:
-            _transfer_1010 = cosmo_CLASS.get_transfer(z = 1010)
-            _k_CLASS       = _transfer_1010['k (h/Mpc)'][:-1] * _h # we don't take the last point for numerical issues and instead use the value of the second to last (in the interpolation below)
-            _Tvcb_array    = interp1d(_k_CLASS, _transfer_1010['t_b'][:-1], bounds_error = False, fill_value = (0.0, _transfer_1010['t_b'][-2]))(_k_array)/_k_array
-        
+        _Tvcb_array = cosmo_CLASS.get_transfer(z = 1010)['t_b'][:-1]/_k_array if user_params.USE_RELATIVE_VELOCITIES else np.zeros(len(_k_array))
 
-        _thermo = cosmo_CLASS.get_thermodynamics()
-
-
+        # get the thermodynamics
+        _thermo  = cosmo_CLASS.get_thermodynamics()
     
-    # if no wdm is present we just fix the power spectrum to that of LCDM
-    if n_ncdm  == 0:
+    
+    # if no ncdm is present we just fix the power spectrum to that of LCDM
+    if n_ncdm == 0:
         
-        _k_array    = _k_array_LCDM
-        _Tm_array   = _Tm_array_LCDM
+        _k_array = _k_array_LCDM
+        _Tm_array = _Tm_array_LCDM
         _Tvcb_array = _Tvcb_array_LCDM
 
         _thermo  = cosmo_CLASS_LCDM.get_thermodynamics()
@@ -3323,21 +3287,17 @@ def init_TF_and_IGM_tables(*, user_params = None, cosmo_params = None, astro_par
     #################################################
     #################################################
     
-
     # initialise the power spectrum tables in the C-code
-    #print("Values of the transfer function:", _Tm_array, " for k=", _k_array, " Mpc^{-1}", flush=True)
     _c_call_init_TF_CLASS(user_params, cosmo_params, _k_array, _Tm_array, _Tvcb_array, _k_array_LCDM, _Tm_array_LCDM, _Tvcb_array_LCDM)
     
-
     # Get the thermodynamical quantities
     _z   = _thermo['z']
     _x_e = _thermo['x_e']
     _T_b = _thermo['Tb [K]']
 
-    # initialise the ionization and temperature tables in the C-code
+    # initialise the power ionization and temperature tables in the C-code
     _c_call_init_IGM_from_input(_z, _T_b, _x_e)   
 
-    #return _k_array, _mps_array, _Tm_array
     return (user_params, cosmo_params, astro_params, flag_options)
 
 
@@ -3346,6 +3306,8 @@ def free_C_memory():
     lib.FreePhotonConsMemory()
     lib.free_TF_CLASS()
     lib.destruct_heat()
+    lib.destruct_pmf()
+    lib.destruct_pmf_growth()
     lib.FreeTsInterpolationTables()
 
 
@@ -3630,13 +3592,20 @@ def run_lightcone(
         }
 
         global_q = {quantity: np.zeros(len(scrollz)) for quantity in global_quantities}
-        global_xHIIdb = np.zeros(len(scrollz))
+        global_xHIIdb  = np.zeros(len(scrollz))
+        dpmf_ad_dt     = np.zeros(len(scrollz))
+        dpmf_turb_dt   = np.zeros(len(scrollz))
+        dxheat_dt      = np.zeros(len(scrollz))
+        dxheat_dt_MINI = np.zeros(len(scrollz))
+        chiB           = np.zeros(len(scrollz))
+
         pf = None
 
         perturb_files = []
         spin_temp_files = []
         ionize_files = []
         brightness_files = []
+
         log10_mturnovers = np.zeros(len(scrollz))
         log10_mturnovers_mini = np.zeros(len(scrollz))
 
@@ -3759,7 +3728,21 @@ def run_lightcone(
                 )
 
             # compute the product xHII*(1+delta_b)
-            global_xHIIdb[iz] = np.mean((1.0 - ib2.xH_box) * (1.0 + pf2.density))
+            global_xHIIdb[iz]  = np.mean((1.0 - ib2.xH_box) * (1.0 + pf2.density))
+            
+            if flag_options.USE_TS_FLUCT:
+                dpmf_ad_dt[iz]       = np.mean(st2.dpmf_ad_dt_box)
+                dpmf_turb_dt[iz]     = np.mean(st2.dpmf_turb_dt_box)
+                dxheat_dt[iz]        = np.mean(st2.dxheat_dt_box)
+
+                st2.dpmf_ad_dt_ave   = dpmf_ad_dt[iz]
+                st2.dpmf_turb_dt_ave = dpmf_turb_dt[iz]
+                chiB[iz]             = st2.pmf_chiB 
+                
+                if flag_options.USE_MINI_HALOS:
+                    dxheat_dt_MINI[iz] = np.mean(st2.dxheat_dt_box_MINI)
+
+                #print(z, ":", st2.dpmf_ad_dt_ave, st2.dpmf_turb_dt_ave, chiB[iz], flush = True)
 
             # Interpolate the lightcone
             if z < max_redshift:
@@ -3830,7 +3813,9 @@ def run_lightcone(
                 init_box.random_seed,
                 lc,
                 node_redshifts=scrollz,
-                global_quantities=(global_q | {'xHIIdb' : global_xHIIdb, 'log10_mturnovers' : log10_mturnovers, 'log10_mturnovers_mini' : log10_mturnovers_mini}),
+                global_quantities=(global_q | {'xHIIdb' : global_xHIIdb, 'dpmf_ad_dt' : dpmf_ad_dt, 'dpmf_turb_dt' : dpmf_turb_dt,
+                                               'dxheat_dt' : dxheat_dt, 'dxheat_dt_MINI' : dxheat_dt_MINI,
+                                               'log10_mturnovers' : log10_mturnovers, 'log10_mturnovers_mini' : log10_mturnovers_mini, 'chiB' : chiB}),
                 photon_nonconservation_data=photon_nonconservation_data,
                 _globals=dict(global_params.items()),
                 cache_files={
