@@ -1,4 +1,4 @@
-# exo21cmFAST
+# 21cmCLAST
 
 [![License: GPL v3](https://img.shields.io/badge/license-GPLv3-green.svg)](https://www.gnu.org/licenses/gpl-3.0)
 
